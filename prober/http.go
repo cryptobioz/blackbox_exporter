@@ -311,7 +311,13 @@ func ProbeHTTP(ctx context.Context, target string, module config.Module, registr
 		})
 	)
 
-	for _, lv := range []string{"resolve", "connect", "tls", "processing", "transfer"} {
+	// Check the option to send the url unresolved to the proxy
+	skipDNS := module.HTTP.UseProxyDNS && module.HTTP.HTTPClientConfig.ProxyURL.URL != nil
+
+	if !skipDNS {
+		durationGaugeVec.WithLabelValues("resolve")
+	}
+	for _, lv := range []string{"connect", "tls", "processing", "transfer"} {
 		durationGaugeVec.WithLabelValues(lv)
 	}
 
@@ -339,12 +345,17 @@ func ProbeHTTP(ctx context.Context, target string, module config.Module, registr
 	targetHost := targetURL.Hostname()
 	targetPort := targetURL.Port()
 
-	ip, lookupTime, err := chooseProtocol(ctx, module.HTTP.IPProtocol, module.HTTP.IPProtocolFallback, targetHost, registry, logger)
-	if err != nil {
-		level.Error(logger).Log("msg", "Error resolving address", "err", err)
-		return false
+	// Resolve the host unless letting the proxy do the job.
+	var ip *net.IPAddr
+	if !skipDNS {
+		var lookupTime float64
+		ip, lookupTime, err = chooseProtocol(ctx, module.HTTP.IPProtocol, module.HTTP.IPProtocolFallback, targetHost, registry, logger)
+		if err != nil {
+			level.Error(logger).Log("msg", "Error resolving address", "err", err)
+			return false
+		}
+		durationGaugeVec.WithLabelValues("resolve").Add(lookupTime)
 	}
-	durationGaugeVec.WithLabelValues("resolve").Add(lookupTime)
 
 	httpClientConfig := module.HTTP.HTTPClientConfig
 	if len(httpClientConfig.TLSConfig.ServerName) == 0 {
@@ -393,7 +404,6 @@ func ProbeHTTP(ctx context.Context, target string, module config.Module, registr
 
 	// Replace the host field in the URL with the IP we resolved unless letting a proxy server do the name resolution.
 	origHost := targetURL.Host
-	skipDNS := module.HTTP.UseProxyDNS && module.HTTP.HTTPClientConfig.ProxyURL.URL != nil
 
 	if !skipDNS {
 		if targetPort == "" {
